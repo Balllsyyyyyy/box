@@ -1,5 +1,5 @@
 # box
-A fun little voxel building game in C (W.I.P)
+A fun little voxel block building game in C (W.I.P)
 
 <img width="640" height="480" alt="game" src="https://github.com/user-attachments/assets/5a59abbe-48b2-4eff-ba9b-473d33eaa7c3" />
 
