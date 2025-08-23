@@ -20,3 +20,11 @@ Run `box`:
 ```
 ./box
 ```
+
+## Controls
+Mouse = Move camera
+W, A, S, D = Move player
+Left click = Place block
+Right click = Remove block
+Backspace = Uncapture/capture mouse
+Escape = Exit
