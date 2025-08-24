@@ -26,15 +26,12 @@
 
 #define GROUND_THICKNESS 0.1f
 
-#define MAX_DEBRIS_PIECES 5
-#define MAX_TOTAL_DEBRIS (1000 * MAX_DEBRIS_PIECES)
-#define DEBRIS_SIZE 0.2f
-#define DEBRIS_FALL_THRESHOLD -5.0f
-#define DEBRIS_ROTATION_SPEED 100.0f
-
 #define CROSSHAIR_SIZE 10
 #define FPS_TEXT_SIZE 20
 #define FPS_UPDATE_INTERVAL 0.1f
+
+#define MAX_FADING_BLOCKS 100
+#define FADE_TIME 0.1f
 
 typedef enum {
     BLOCK_STONE = 1,
@@ -51,20 +48,18 @@ typedef struct {
 
 typedef struct {
     Vector3 position;
-    Vector3 velocity;
-    Vector3 rotationAxis;
-    float rotationAngle;
-    bool active;
+    float fadeTimer;
     BlockType type;
-} Debris;
+    bool active;
+} FadingBlock;
 
 Block* blocks = NULL;
 int blockCount = 0;
 int blockCapacity = 0;
 
-Debris* debris = NULL;
-int debrisCount = 0;
-int debrisCapacity = 0;
+FadingBlock* fadingBlocks = NULL;
+int fadingBlockCount = 0;
+int fadingBlockCapacity = 0;
 
 BlockType selectedBlockType = BLOCK_STONE;
 
@@ -218,14 +213,14 @@ void _gc() {
     }
     blockCount = newBlockCount;
 
-    int newDebrisCount = 0;
-    for (int i = 0; i < debrisCount; i++) {
-        if (debris[i].active) {
-            debris[newDebrisCount] = debris[i];
-            newDebrisCount++;
+    int newFadingBlockCount = 0;
+    for (int i = 0; i < fadingBlockCount; i++) {
+        if (fadingBlocks[i].active) {
+            fadingBlocks[newFadingBlockCount] = fadingBlocks[i];
+            newFadingBlockCount++;
         }
     }
-    debrisCount = newDebrisCount;
+    fadingBlockCount = newFadingBlockCount;
 }
 
 int main(void) {
@@ -258,8 +253,8 @@ int main(void) {
     blockCapacity = 100;
     blocks = (Block*)malloc(blockCapacity * sizeof(Block));
 
-    debrisCapacity = MAX_TOTAL_DEBRIS;
-    debris = (Debris*)malloc(debrisCapacity * sizeof(Debris));
+    fadingBlockCapacity = MAX_FADING_BLOCKS;
+    fadingBlocks = (FadingBlock*)malloc(fadingBlockCapacity * sizeof(FadingBlock));
 
     Texture2D stoneTexture = LoadTexture("stone.png");
     Texture2D grassTexture = LoadTexture("grass.png");
@@ -296,7 +291,6 @@ int main(void) {
     blockTextures[BLOCK_WOOD] = woodTexture;
 
     Model blockModel = LoadModelFromMesh(GenMeshCube(1.0f, 1.0f, 1.0f));
-    Model debrisModel = LoadModelFromMesh(GenMeshCube(DEBRIS_SIZE, DEBRIS_SIZE, DEBRIS_SIZE));
     Model ghostBlockModel = LoadModelFromMesh(GenMeshCube(1.0f, 1.0f, 1.0f));
     Model groundModel = LoadModelFromMesh(GenMeshPlane((float)BOARD_SIZE, (float)BOARD_SIZE, BOARD_SIZE, BOARD_SIZE));
 
@@ -509,39 +503,25 @@ int main(void) {
         }
 
         if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && hitBlockIndex != -1 && mouseCaptured) {
-            Vector3 brokenBlockPos = blocks[hitBlockIndex].position;
-            BlockType brokenBlockType = blocks[hitBlockIndex].type;
+            if (fadingBlockCount < fadingBlockCapacity) {
+                fadingBlocks[fadingBlockCount].position = blocks[hitBlockIndex].position;
+                fadingBlocks[fadingBlockCount].type = blocks[hitBlockIndex].type;
+                fadingBlocks[fadingBlockCount].fadeTimer = FADE_TIME;
+                fadingBlocks[fadingBlockCount].active = true;
+                fadingBlockCount++;
+            }
             blocks[hitBlockIndex].active = false;
             _gc();
-
-            for (int i = 0; i < MAX_DEBRIS_PIECES; i++) {
-                if (debrisCount < debrisCapacity) {
-                    debris[debrisCount].position = brokenBlockPos;
-                    debris[debrisCount].active = true;
-                    debris[debrisCount].type = brokenBlockType;
-                    debris[debrisCount].rotationAngle = 0.0f;
-                    debris[debrisCount].rotationAxis = Vector3Normalize((Vector3){(float)GetRandomValue(-100, 100), (float)GetRandomValue(-100, 100), (float)GetRandomValue(-100, 100)});
-
-                    debris[debrisCount].velocity.x = GetRandomValue(-100, 100) / 1000.0f;
-                    debris[debrisCount].velocity.y = GetRandomValue(50, 200) / 1000.0f;
-                    debris[debrisCount].velocity.z = GetRandomValue(-100, 100) / 1000.0f;
-
-                    debrisCount++;
-                }
-            }
             hitBlockIndex = -1;
         }
 
         skip_mouse_input:
 
-        for (int i = 0; i < debrisCount; i++) {
-            if (debris[i].active) {
-                debris[i].velocity.y += GRAVITY * deltaTime;
-                debris[i].position = Vector3Add(debris[i].position, Vector3Scale(debris[i].velocity, deltaTime));
-                debris[i].rotationAngle += DEBRIS_ROTATION_SPEED * deltaTime;
-
-                if (debris[i].position.y < DEBRIS_FALL_THRESHOLD) {
-                    debris[i].active = false;
+        for (int i = 0; i < fadingBlockCount; i++) {
+            if (fadingBlocks[i].active) {
+                fadingBlocks[i].fadeTimer -= deltaTime;
+                if (fadingBlocks[i].fadeTimer <= 0) {
+                    fadingBlocks[i].active = false;
                 }
             }
         }
@@ -564,12 +544,16 @@ int main(void) {
             }
         }
 
-        for (int i = 0; i < debrisCount; i++) {
-            if (debris[i].active) {
-                debrisModel.materials[0] = *blockMaterials[debris[i].type];
-                DrawModelEx(debrisModel, debris[i].position, debris[i].rotationAxis, debris[i].rotationAngle, (Vector3){1.0f, 1.0f, 1.0f}, WHITE);
+        rlDisableBackfaceCulling();
+        for (int i = 0; i < fadingBlockCount; i++) {
+            if (fadingBlocks[i].active) {
+                float alpha = fadingBlocks[i].fadeTimer / FADE_TIME;
+                Color fadeColor = (Color){255, 255, 255, (unsigned char)(alpha * 255)};
+                blockModel.materials[0] = *blockMaterials[fadingBlocks[i].type];
+                DrawModel(blockModel, fadingBlocks[i].position, 1.0f, fadeColor);
             }
         }
+        rlEnableBackfaceCulling();
 
         if (showGhostBlock && mouseCaptured) {
             float t = fmodf(GetTime() * GHOST_BLOCK_SPEED, 1.0f);
@@ -597,7 +581,6 @@ int main(void) {
     }
 
     UnloadModel(blockModel);
-    UnloadModel(debrisModel);
     UnloadModel(ghostBlockModel);
     UnloadModel(groundModel);
     UnloadTexture(grassTexture);
@@ -611,7 +594,7 @@ int main(void) {
     UnloadMaterial(groundMaterial);
 
     free(blocks);
-    free(debris);
+    free(fadingBlocks);
 
     EnableCursor();
     CloseWindow();
