@@ -3,3 +3,4 @@
 3.) Add GPL notice thingys to the code
 4.) Make the Makefile better
 5.) Use a custom font for the OSD
+6.) Fix up debris
