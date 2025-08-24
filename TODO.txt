@@ -1,6 +1,5 @@
-1.) Fix player cant walk under 2 block high doorways
-2.) Add like a gray wireframe around the blocks
-3.) Embed the images into like a .h file with some sort of remix of my old .ega format
-4.) Add GPL notice thingys to the code
-5.) Make the Makefile better
-6.) Use a custom font for the OSD
+1.) Add like a gray wireframe around the blocks
+2.) Embed the images into like a .h file with some sort of remix of my old .ega format
+3.) Add GPL notice thingys to the code
+4.) Make the Makefile better
+5.) Use a custom font for the OSD
