@@ -4,7 +4,7 @@ A fun little voxel block building game in C (W.I.P.)
 <img width="640" height="480" alt="image" src="https://github.com/user-attachments/assets/72a8a782-b57f-470f-a848-3619b9931556" />
 
 ## Build
-You will need `raylib`, `git`, `gcc`, and `make`.
+You will need `libraylib-dev`, `git`, `gcc`, and `make`.
 
 Download `box`:
 ```
