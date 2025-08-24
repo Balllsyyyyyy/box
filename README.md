@@ -1,4 +1,7 @@
 # box
+
+## So I have stopped working on this game so if you want to work on this game, you can fork it, you will have a nice little base to start off with so yeah.
+
 A fun little voxel block building game in C (W.I.P.)
 
 <img width="640" height="480" alt="image" src="https://github.com/user-attachments/assets/72a8a782-b57f-470f-a848-3619b9931556" />
