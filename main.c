@@ -1,5 +1,6 @@
 #include "raylib.h"
 #include "raymath.h"
+#include "rlgl.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,15 +8,15 @@
 #define TILE_SIZE 1.0f
 #define BOARD_SIZE 100
 
-#define GRAVITY -0.01f
-#define JUMP_FORCE 0.2f
-#define RESPAWN_Y_THRESHOLD -30.0f
+#define GRAVITY -35.0f
+#define JUMP_FORCE 10.0f
+#define RESPAWN_Y_THRESHOLD -10.0f
 
-#define CAMERA_HEIGHT 1.9f
-#define CAMERA_SPEED 0.1f
+#define CAMERA_HEIGHT 2.0f
+#define CAMERA_SPEED 4.0f
 #define MOUSE_SENSITIVITY 0.003f
 #define PLAYER_RADIUS 0.3f
-#define PLAYER_HEIGHT 1.9f
+#define PLAYER_HEIGHT 2.0f
 #define SPAWN_POSITION (Vector3){ 50.0f, CAMERA_HEIGHT, 50.0f }
 
 #define GHOST_BLOCK_MIN_ALPHA 0.3f
@@ -23,30 +24,38 @@
 #define GHOST_BLOCK_SPEED 2.0f
 #define CUBE_WIRE_OFFSET 1.001f
 
-#define GROUND_COLOR_1 DARKGREEN
-#define GROUND_COLOR_2 GREEN
 #define GROUND_THICKNESS 0.1f
-
-#define BLOCK_COLOR GRAY
-#define GHOST_BLOCK_COLOR WHITE
 
 #define MAX_DEBRIS_PIECES 5
 #define MAX_TOTAL_DEBRIS (1000 * MAX_DEBRIS_PIECES)
 #define DEBRIS_SIZE 0.2f
 #define DEBRIS_FALL_THRESHOLD -5.0f
+#define DEBRIS_ROTATION_SPEED 100.0f
 
 #define CROSSHAIR_SIZE 10
 #define FPS_TEXT_SIZE 20
+#define FPS_UPDATE_INTERVAL 0.1f
+
+typedef enum {
+    BLOCK_STONE = 1,
+    BLOCK_GRASS = 2,
+    BLOCK_DIRT = 3,
+    BLOCK_WOOD = 4
+} BlockType;
 
 typedef struct {
     Vector3 position;
     bool active;
+    BlockType type;
 } Block;
 
 typedef struct {
     Vector3 position;
     Vector3 velocity;
+    Vector3 rotationAxis;
+    float rotationAngle;
     bool active;
+    BlockType type;
 } Debris;
 
 Block* blocks = NULL;
@@ -57,27 +66,43 @@ Debris* debris = NULL;
 int debrisCount = 0;
 int debrisCapacity = 0;
 
+BlockType selectedBlockType = BLOCK_STONE;
+
 bool CheckPlayerCollision(Vector3 playerPos, Block* blocks, int blockCount);
 float FindGroundLevel(Vector3 position, Block* blocks, int blockCount);
 bool IsPlayerSupported(Vector3 playerPos, Block* blocks, int blockCount);
 void _gc();
 
-bool CheckPlayerCollision(Vector3 playerPos, Block* blocks, int blockCount) {
+void DrawBlockPreview(Texture2D texture) {
+    int previewSize = 64;
+    int padding = 20;
+    int screenWidth = GetScreenWidth();
+    int screenHeight = GetScreenHeight();
 
-    Vector3 playerFeet = { playerPos.x, playerPos.y - PLAYER_HEIGHT / 2, playerPos.z };
-    Vector3 playerHead = { playerPos.x, playerPos.y + PLAYER_HEIGHT / 2, playerPos.z };
+    Rectangle destRec = { screenWidth - previewSize - padding, padding, previewSize, previewSize };
+    DrawTexturePro(texture, (Rectangle){0, 0, texture.width, texture.height}, destRec, (Vector2){0,0}, 0.0f, WHITE);
+}
+
+bool CheckAABBCollision(BoundingBox box1, BoundingBox box2) {
+    return (box1.min.x <= box2.max.x && box1.max.x >= box2.min.x) &&
+           (box1.min.y <= box2.max.y && box1.max.y >= box2.min.y) &&
+           (box1.min.z <= box2.max.z && box1.max.z >= box2.min.z);
+}
+
+bool CheckPlayerCollision(Vector3 playerPos, Block* blocks, int blockCount) {
+    BoundingBox playerBox = {
+        (Vector3){ playerPos.x - PLAYER_RADIUS, playerPos.y - PLAYER_HEIGHT / 2.0f, playerPos.z - PLAYER_RADIUS },
+        (Vector3){ playerPos.x + PLAYER_RADIUS, playerPos.y + PLAYER_HEIGHT / 2.0f, playerPos.z + PLAYER_RADIUS }
+    };
 
     for (int i = 0; i < blockCount; i++) {
         if (blocks[i].active) {
-            Vector3 blockMin = { blocks[i].position.x - 0.5f, blocks[i].position.y - 0.5f, blocks[i].position.z - 0.5f };
-            Vector3 blockMax = { blocks[i].position.x + 0.5f, blocks[i].position.y + 0.5f, blocks[i].position.z + 0.5f };
+            BoundingBox blockBox = {
+                (Vector3){ blocks[i].position.x - 0.5f, blocks[i].position.y - 0.5f, blocks[i].position.z - 0.5f },
+                (Vector3){ blocks[i].position.x + 0.5f, blocks[i].position.y + 0.5f, blocks[i].position.z + 0.5f }
+            };
 
-            bool horizontalOverlap = (fabs(playerPos.x - blocks[i].position.x) < (0.5f + PLAYER_RADIUS)) &&
-                                     (fabs(playerPos.z - blocks[i].position.z) < (0.5f + PLAYER_RADIUS));
-
-            bool verticalOverlap = (playerHead.y >= blockMin.y) && (playerFeet.y <= blockMax.y);
-
-            if (horizontalOverlap && verticalOverlap) {
+            if (CheckAABBCollision(playerBox, blockBox)) {
                 return true;
             }
         }
@@ -85,37 +110,63 @@ bool CheckPlayerCollision(Vector3 playerPos, Block* blocks, int blockCount) {
     return false;
 }
 
-bool CheckHorizontalCollision(Vector3 playerPos, Block* blocks, int blockCount) {
-    Vector3 playerFeet = { playerPos.x, playerPos.y - PLAYER_HEIGHT / 2, playerPos.z };
+Vector3 CheckMoveCollision(Vector3 newPos, Block* blocks, int blockCount) {
+    BoundingBox playerBox = {
+        (Vector3){ newPos.x - PLAYER_RADIUS, newPos.y - PLAYER_HEIGHT/2.0f, newPos.z - PLAYER_RADIUS },
+        (Vector3){ newPos.x + PLAYER_RADIUS, newPos.y + PLAYER_HEIGHT/2.0f, newPos.z + PLAYER_RADIUS }
+    };
+
+    Vector3 correction = {0.0f, 0.0f, 0.0f};
 
     for (int i = 0; i < blockCount; i++) {
         if (blocks[i].active) {
-            Vector3 blockMin = { blocks[i].position.x - 0.5f, blocks[i].position.y - 0.5f, blocks[i].position.z - 0.5f };
-            Vector3 blockMax = { blocks[i].position.x + 0.5f, blocks[i].position.y + 0.5f, blocks[i].position.z + 0.5f };
+            BoundingBox blockBox = {
+                (Vector3){ blocks[i].position.x - 0.5f, blocks[i].position.y - 0.5f, blocks[i].position.z - 0.5f },
+                (Vector3){ blocks[i].position.x + 0.5f, blocks[i].position.y + 0.5f, blocks[i].position.z + 0.5f }
+            };
 
-            bool horizontalOverlap = (fabs(playerPos.x - blocks[i].position.x) < (0.5f + PLAYER_RADIUS)) &&
-                                     (fabs(playerPos.z - blocks[i].position.z) < (0.5f + PLAYER_RADIUS));
+            if (CheckAABBCollision(playerBox, blockBox)) {
 
-            bool verticalOverlap = playerFeet.y <= blockMax.y;
+                float overlapX = fminf(playerBox.max.x - blockBox.min.x, blockBox.max.x - playerBox.min.x);
+                float overlapY = fminf(playerBox.max.y - blockBox.min.y, blockBox.max.y - playerBox.min.y);
+                float overlapZ = fminf(playerBox.max.z - blockBox.min.z, blockBox.max.z - playerBox.min.z);
 
-            if (horizontalOverlap && verticalOverlap) {
-                return true;
+                if (overlapX < overlapY && overlapX < overlapZ) {
+                    if (playerBox.max.x - blockBox.min.x < blockBox.max.x - playerBox.min.x) {
+                        correction.x = -overlapX;
+                    } else {
+                        correction.x = overlapX;
+                    }
+                } else if (overlapY < overlapX && overlapY < overlapZ) {
+                    if (playerBox.max.y - blockBox.min.y < blockBox.max.y - playerBox.min.y) {
+                        correction.y = -overlapY;
+                    } else {
+                        correction.y = overlapY;
+                    }
+                } else {
+                    if (playerBox.max.z - blockBox.min.z < blockBox.max.z - playerBox.min.z) {
+                        correction.z = -overlapZ;
+                    } else {
+                        correction.z = overlapZ;
+                    }
+                }
+
+                return correction;
             }
         }
     }
-    return false;
+    return correction;
 }
 
 float FindGroundLevel(Vector3 position, Block* blocks, int blockCount) {
     float groundLevel = 0.0f;
+    int targetX = (int)roundf(position.x);
+    int targetZ = (int)roundf(position.z);
 
-    if (position.x >= 0 && position.x < BOARD_SIZE && position.z >= 0 && position.z < BOARD_SIZE) {
+    if (targetX >= 0 && targetX < BOARD_SIZE && targetZ >= 0 && targetZ < BOARD_SIZE) {
         for (int i = 0; i < blockCount; i++) {
             if (blocks[i].active) {
-                float dx = fabs(position.x - blocks[i].position.x);
-                float dz = fabs(position.z - blocks[i].position.z);
-
-                if (dx < (0.5f + PLAYER_RADIUS) && dz < (0.5f + PLAYER_RADIUS)) {
+                if (roundf(blocks[i].position.x) == targetX && roundf(blocks[i].position.z) == targetZ) {
                     float blockTop = blocks[i].position.y + 0.5f;
                     if (blockTop > groundLevel) {
                         groundLevel = blockTop;
@@ -130,11 +181,28 @@ float FindGroundLevel(Vector3 position, Block* blocks, int blockCount) {
 }
 
 bool IsPlayerSupported(Vector3 playerPos, Block* blocks, int blockCount) {
-    if (playerPos.x >= 0 && playerPos.x < BOARD_SIZE && playerPos.z >= 0 && playerPos.z < BOARD_SIZE) {
-        float groundLevel = FindGroundLevel(playerPos, blocks, blockCount);
-        float expectedHeight = groundLevel + CAMERA_HEIGHT;
+    BoundingBox playerFeetBox = {
+        (Vector3){ playerPos.x - PLAYER_RADIUS, playerPos.y - PLAYER_HEIGHT / 2.0f - 0.1f, playerPos.z - PLAYER_RADIUS },
+        (Vector3){ playerPos.x + PLAYER_RADIUS, playerPos.y - PLAYER_HEIGHT / 2.0f, playerPos.z + PLAYER_RADIUS }
+    };
 
-        return fabs(playerPos.y - expectedHeight) < 0.15f;
+    for (int i = 0; i < blockCount; i++) {
+        if (blocks[i].active) {
+            BoundingBox blockTopBox = {
+                (Vector3){ blocks[i].position.x - 0.5f, blocks[i].position.y + 0.5f - 0.1f, blocks[i].position.z - 0.5f },
+                (Vector3){ blocks[i].position.x + 0.5f, blocks[i].position.y + 0.5f, blocks[i].position.z + 0.5f }
+            };
+
+            if (CheckAABBCollision(playerFeetBox, blockTopBox)) {
+                return true;
+            }
+        }
+    }
+
+    if (playerFeetBox.min.y <= 0.5f && playerFeetBox.max.y >= -0.5f) {
+        if (playerPos.x >= 0.0f && playerPos.x <= BOARD_SIZE && playerPos.z >= 0.0f && playerPos.z <= BOARD_SIZE) {
+            return true;
+        }
     }
 
     return false;
@@ -161,12 +229,12 @@ void _gc() {
 }
 
 int main(void) {
+    SetTraceLogLevel(LOG_ERROR);
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(800, 600, "box");
-    SetTargetFPS(60);
 
-    int screenWidth = 800;
-    int screenHeight = 600;
+    int screenWidth = GetScreenWidth();
+    int screenHeight = GetScreenHeight();
 
     bool mouseCaptured = true;
     bool skipNextClick = false;
@@ -184,59 +252,120 @@ int main(void) {
     float yaw = 0.0f;
     float pitch = 0.0f;
 
+    int displayedFPS = 60;
+    float fpsUpdateTimer = 0.0f;
+
     blockCapacity = 100;
     blocks = (Block*)malloc(blockCapacity * sizeof(Block));
 
     debrisCapacity = MAX_TOTAL_DEBRIS;
     debris = (Debris*)malloc(debrisCapacity * sizeof(Debris));
 
-    Texture2D grassTexture = LoadTexture("grass.jpg");
-    Texture2D stoneTexture = LoadTexture("stone.jpg");
+    Texture2D stoneTexture = LoadTexture("stone.png");
+    Texture2D grassTexture = LoadTexture("grass.png");
+    Texture2D dirtTexture = LoadTexture("dirt.png");
+    Texture2D woodTexture = LoadTexture("wood.png");
 
-    Model groundModel = LoadModelFromMesh(GenMeshCube(TILE_SIZE, GROUND_THICKNESS, TILE_SIZE));
-    Model blockModel = LoadModelFromMesh(GenMeshCube(1.0f, 1.0f, 1.0f));
-    Model debrisModel = LoadModelFromMesh(GenMeshCube(DEBRIS_SIZE, DEBRIS_SIZE, DEBRIS_SIZE));
-
-    Model ghostBlockModel = LoadModelFromMesh(GenMeshCube(1.0f, 1.0f, 1.0f));
-
-    Material grassMaterial = LoadMaterialDefault();
-    grassMaterial.maps[MATERIAL_MAP_DIFFUSE].texture = grassTexture;
+    SetTextureFilter(grassTexture, TEXTURE_FILTER_POINT);
+    SetTextureFilter(stoneTexture, TEXTURE_FILTER_POINT);
+    SetTextureFilter(dirtTexture, TEXTURE_FILTER_POINT);
+    SetTextureFilter(woodTexture, TEXTURE_FILTER_POINT);
 
     Material stoneMaterial = LoadMaterialDefault();
     stoneMaterial.maps[MATERIAL_MAP_DIFFUSE].texture = stoneTexture;
 
-    Material ghostMaterial = LoadMaterialDefault();
+    Material grassMaterial = LoadMaterialDefault();
+    grassMaterial.maps[MATERIAL_MAP_DIFFUSE].texture = grassTexture;
 
-    groundModel.materials[0] = grassMaterial;
-    blockModel.materials[0] = stoneMaterial;
-    debrisModel.materials[0] = stoneMaterial;
+    Material dirtMaterial = LoadMaterialDefault();
+    dirtMaterial.maps[MATERIAL_MAP_DIFFUSE].texture = dirtTexture;
+
+    Material woodMaterial = LoadMaterialDefault();
+    woodMaterial.maps[MATERIAL_MAP_DIFFUSE].texture = woodTexture;
+
+    Material* blockMaterials[5];
+    blockMaterials[BLOCK_STONE] = &stoneMaterial;
+    blockMaterials[BLOCK_GRASS] = &grassMaterial;
+    blockMaterials[BLOCK_DIRT] = &dirtMaterial;
+    blockMaterials[BLOCK_WOOD] = &woodMaterial;
+
+    Texture2D blockTextures[5];
+    blockTextures[BLOCK_STONE] = stoneTexture;
+    blockTextures[BLOCK_GRASS] = grassTexture;
+    blockTextures[BLOCK_DIRT] = dirtTexture;
+    blockTextures[BLOCK_WOOD] = woodTexture;
+
+    Model blockModel = LoadModelFromMesh(GenMeshCube(1.0f, 1.0f, 1.0f));
+    Model debrisModel = LoadModelFromMesh(GenMeshCube(DEBRIS_SIZE, DEBRIS_SIZE, DEBRIS_SIZE));
+    Model ghostBlockModel = LoadModelFromMesh(GenMeshCube(1.0f, 1.0f, 1.0f));
+    Model groundModel = LoadModelFromMesh(GenMeshPlane((float)BOARD_SIZE, (float)BOARD_SIZE, BOARD_SIZE, BOARD_SIZE));
+
+    Material groundMaterial = LoadMaterialDefault();
+    groundMaterial.maps[MATERIAL_MAP_DIFFUSE].texture = grassTexture;
+
+    groundModel.materials[0] = groundMaterial;
+
+    float* texcoords = groundModel.meshes[0].texcoords;
+    int vertices_x = BOARD_SIZE + 1;
+    int vertices_y = BOARD_SIZE + 1;
+
+    for (int i = 0; i < vertices_x; i++) {
+        for (int j = 0; j < vertices_y; j++) {
+            texcoords[2 * (i + j * vertices_x)] = (float)i;
+            texcoords[2 * (i + j * vertices_x) + 1] = (float)j;
+        }
+    }
+
+    UpdateMeshBuffer(groundModel.meshes[0], 1, groundModel.meshes[0].texcoords, groundModel.meshes[0].vertexCount * 2 * sizeof(float), 0);
 
     while (!WindowShouldClose()) {
+        float deltaTime = GetFrameTime();
+
+        fpsUpdateTimer += deltaTime;
+        if (fpsUpdateTimer >= FPS_UPDATE_INTERVAL) {
+            displayedFPS = GetFPS();
+            fpsUpdateTimer = 0.0f;
+        }
+
         if (IsWindowResized()) {
             screenWidth = GetScreenWidth();
             screenHeight = GetScreenHeight();
-
-            camera.fovy = 60.0f;
         }
+
+        if (IsKeyPressed(KEY_ONE)) selectedBlockType = BLOCK_STONE;
+        if (IsKeyPressed(KEY_TWO)) selectedBlockType = BLOCK_GRASS;
+        if (IsKeyPressed(KEY_THREE)) selectedBlockType = BLOCK_DIRT;
+        if (IsKeyPressed(KEY_FOUR)) selectedBlockType = BLOCK_WOOD;
 
         if (IsKeyPressed(KEY_BACKSPACE)) {
             mouseCaptured = !mouseCaptured;
             if (mouseCaptured) {
                 DisableCursor();
+                SetMousePosition(GetScreenWidth() / 2, GetScreenHeight() / 2);
+                skipNextClick = true;
             } else {
                 EnableCursor();
+                skipNextClick = false;
             }
         }
 
-        if (IsKeyPressed(KEY_F11)) {
-            ToggleFullscreen();
-            if (mouseCaptured) {
+        if (!mouseCaptured && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            if (GetMousePosition().x >= 0 && GetMousePosition().x < GetScreenWidth() &&
+                GetMousePosition().y >= 0 && GetMousePosition().y < GetScreenHeight()) {
+                mouseCaptured = true;
+                DisableCursor();
                 SetMousePosition(GetScreenWidth() / 2, GetScreenHeight() / 2);
+                skipNextClick = true;
+
+                goto skip_mouse_input;
             }
         }
 
-        if (skipNextClick && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
-            skipNextClick = false;
+        if (skipNextClick) {
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+                skipNextClick = false;
+                goto skip_mouse_input;
+            }
         }
 
         if (mouseCaptured) {
@@ -271,162 +400,117 @@ int main(void) {
             move = Vector3Normalize(move);
         }
 
-        Vector3 newPosition = Vector3Add(camera.position, Vector3Scale(move, CAMERA_SPEED));
-        newPosition.y = camera.position.y;
-
-        if (!CheckHorizontalCollision(newPosition, blocks, blockCount)) {
-            camera.position.x = newPosition.x;
-            camera.position.z = newPosition.z;
+        Vector3 newPos = Vector3Add(camera.position, Vector3Scale(move, CAMERA_SPEED * deltaTime));
+        Vector3 collisionCorrection = CheckMoveCollision(newPos, blocks, blockCount);
+        if (collisionCorrection.x != 0 || collisionCorrection.z != 0) {
+            newPos = Vector3Add(newPos, (Vector3){collisionCorrection.x, 0.0f, collisionCorrection.z});
         }
+        camera.position = newPos;
 
-        if (isGrounded && IsKeyPressed(KEY_SPACE)) {
-            Vector3 testPos = camera.position;
-            testPos.y += JUMP_FORCE * 15;
-
-            if (!CheckPlayerCollision(testPos, blocks, blockCount)) {
-                velocityY = JUMP_FORCE;
-                isGrounded = false;
-            }
-        }
-
-        if (isGrounded && !IsPlayerSupported(camera.position, blocks, blockCount)) {
-            isGrounded = false;
+        isGrounded = IsPlayerSupported(camera.position, blocks, blockCount);
+        if (isGrounded && IsKeyDown(KEY_SPACE)) {
+            velocityY = JUMP_FORCE;
+        } else if (!isGrounded) {
+            velocityY += GRAVITY * deltaTime;
+        } else {
             velocityY = 0.0f;
         }
 
-        if (!isGrounded) {
-            velocityY += GRAVITY;
-            float newY = camera.position.y + velocityY;
-            Vector3 testPos = camera.position;
-            testPos.y = newY;
-
-            if (!CheckPlayerCollision(testPos, blocks, blockCount)) {
-                camera.position.y = newY;
-
-                if (IsPlayerSupported(testPos, blocks, blockCount)) {
-                    float groundLevel = FindGroundLevel(camera.position, blocks, blockCount);
-                    if (groundLevel > -999.0f) {
-                        float expectedCameraHeight = groundLevel + CAMERA_HEIGHT;
-                        camera.position.y = expectedCameraHeight;
-                        velocityY = 0.0f;
-                        isGrounded = true;
-                    }
-                }
-            } else {
-                float groundLevel = FindGroundLevel(camera.position, blocks, blockCount);
-                if (groundLevel > -999.0f) {
-                    camera.position.y = groundLevel + CAMERA_HEIGHT;
-                    velocityY = 0.0f;
-                    isGrounded = true;
-                }
-            }
+        newPos = camera.position;
+        newPos.y += velocityY * deltaTime;
+        collisionCorrection = CheckMoveCollision(newPos, blocks, blockCount);
+        if (collisionCorrection.y != 0.0f) {
+            newPos.y += collisionCorrection.y;
+            velocityY = 0.0f;
         }
+        camera.position = newPos;
 
         if (camera.position.y < RESPAWN_Y_THRESHOLD) {
             camera.position = SPAWN_POSITION;
             velocityY = 0.0f;
-            isGrounded = true;
         }
 
         camera.target = Vector3Add(camera.position, forward);
 
-        Ray ray = GetMouseRay((Vector2){screenWidth / 2, screenHeight / 2}, camera);
+        Ray ray = GetMouseRay((Vector2){screenWidth / 2.0f, screenHeight / 2.0f}, camera);
 
-        Vector3 cursorBlock;
-        bool validHit = false;
-
-        RayCollision closestBlockHit = { 0 };
-        closestBlockHit.distance = 10000.0f;
+        Vector3 ghostBlockPos = {0};
+        bool showGhostBlock = false;
         int hitBlockIndex = -1;
+        float shortestDistance = 10000.0f;
 
         for (int i = 0; i < blockCount; i++) {
             if (blocks[i].active) {
-                BoundingBox blockBox = (BoundingBox){
-                    (Vector3){ blocks[i].position.x - 0.5f, blocks[i].position.y - 0.5f, blocks[i].position.z - 0.5f },
-                    (Vector3){ blocks[i].position.x + 0.5f, blocks[i].position.y + 0.5f, blocks[i].position.z + 0.5f }
+                BoundingBox blockBox = {
+                    Vector3SubtractValue(blocks[i].position, 0.5f),
+                    Vector3AddValue(blocks[i].position, 0.5f)
                 };
                 RayCollision hitInfo = GetRayCollisionBox(ray, blockBox);
-                if (hitInfo.hit && hitInfo.distance < closestBlockHit.distance) {
-                    closestBlockHit = hitInfo;
+                if (hitInfo.hit && hitInfo.distance < shortestDistance) {
+                    shortestDistance = hitInfo.distance;
                     hitBlockIndex = i;
                 }
             }
         }
 
-        if (closestBlockHit.hit) {
-            Vector3 normal = closestBlockHit.normal;
-            Vector3 gridNormal = {roundf(normal.x), roundf(normal.y), roundf(normal.z)};
-
-            cursorBlock = Vector3Add(blocks[hitBlockIndex].position, gridNormal);
-            validHit = true;
+        if (hitBlockIndex != -1) {
+            BoundingBox hitBlockBox = {
+                Vector3SubtractValue(blocks[hitBlockIndex].position, 0.5f),
+                Vector3AddValue(blocks[hitBlockIndex].position, 0.5f)
+            };
+            RayCollision hitInfo = GetRayCollisionBox(ray, hitBlockBox);
+            Vector3 roundedNormal = { roundf(hitInfo.normal.x), roundf(hitInfo.normal.y), roundf(hitInfo.normal.z) };
+            ghostBlockPos = Vector3Add(blocks[hitBlockIndex].position, roundedNormal);
+            showGhostBlock = true;
         } else {
-            if (ray.direction.y < 0) {
-                float t = -ray.position.y / ray.direction.y;
-                if (t > 0) {
-                    Vector3 hitPoint = Vector3Add(ray.position, Vector3Scale(ray.direction, t));
-
-                    int tileX = (int)roundf(hitPoint.x);
-                    int tileZ = (int)roundf(hitPoint.z);
-
-                    if (tileX >= 0 && tileX < BOARD_SIZE && tileZ >= 0 && tileZ < BOARD_SIZE) {
-                        float highestY = 0.0f;
-                        for (int i = 0; i < blockCount; i++) {
-                            if (blocks[i].active &&
-                                fabs(blocks[i].position.x - tileX) < 0.1f &&
-                                fabs(blocks[i].position.z - tileZ) < 0.1f) {
-                                float blockTop = blocks[i].position.y + 0.5f;
-                                if (blockTop > highestY) {
-                                    highestY = blockTop;
-                                }
-                            }
-                        }
-                        cursorBlock.x = (float)tileX;
-                        cursorBlock.y = highestY + 0.5f;
-                        cursorBlock.z = (float)tileZ;
-                        validHit = true;
-                    }
-                }
+            BoundingBox groundBox = { (Vector3){-0.5f, -0.5f, -0.5f}, (Vector3){BOARD_SIZE-0.5f, 0.5f, BOARD_SIZE-0.5f}};
+            RayCollision groundHit = GetRayCollisionBox(ray, groundBox);
+            if (groundHit.hit) {
+                ghostBlockPos = (Vector3){ roundf(groundHit.point.x), 0.5f, roundf(groundHit.point.z) };
+                showGhostBlock = true;
             }
         }
 
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && validHit && mouseCaptured && !skipNextClick) {
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && showGhostBlock && mouseCaptured) {
             bool occupied = false;
-            Vector3 playerFeetBlock = { roundf(camera.position.x), roundf(camera.position.y - 1.0f), roundf(camera.position.z) };
-            Vector3 playerHeadBlock = { roundf(camera.position.x), roundf(camera.position.y), roundf(camera.position.z) };
+            BoundingBox ghostBox = {
+                Vector3SubtractValue(ghostBlockPos, 0.5f),
+                Vector3AddValue(ghostBlockPos, 0.5f)
+            };
+            BoundingBox playerBox = {
+                (Vector3){ camera.position.x - PLAYER_RADIUS, camera.position.y - PLAYER_HEIGHT / 2.0f, camera.position.z - PLAYER_RADIUS },
+                (Vector3){ camera.position.x + PLAYER_RADIUS, camera.position.y + PLAYER_HEIGHT / 2.0f, camera.position.z + PLAYER_RADIUS }
+            };
 
-            if (fabs(cursorBlock.x - playerFeetBlock.x) < 0.1f &&
-                fabs(cursorBlock.y - playerFeetBlock.y) < 0.1f &&
-                fabs(cursorBlock.z - playerFeetBlock.z) < 0.1f) {
+            if (CheckAABBCollision(ghostBox, playerBox)) {
                 occupied = true;
-            }
-            if (!occupied && fabs(cursorBlock.x - playerHeadBlock.x) < 0.1f &&
-                fabs(cursorBlock.y - playerHeadBlock.y) < 0.1f &&
-                fabs(cursorBlock.z - playerHeadBlock.z) < 0.1f) {
-                occupied = true;
-            }
-
-            for (int i = 0; i < blockCount; i++) {
-                if (blocks[i].active &&
-                    fabs(blocks[i].position.x - cursorBlock.x) < 0.1f &&
-                    fabs(blocks[i].position.y - cursorBlock.y) < 0.1f &&
-                    fabs(blocks[i].position.z - cursorBlock.z) < 0.1f) {
-                    occupied = true;
-                    break;
+            } else {
+                for (int i = 0; i < blockCount; i++) {
+                    if (blocks[i].active &&
+                        fabs(blocks[i].position.x - ghostBlockPos.x) < 0.1f &&
+                        fabs(blocks[i].position.y - ghostBlockPos.y) < 0.1f &&
+                        fabs(blocks[i].position.z - ghostBlockPos.z) < 0.1f) {
+                        occupied = true;
+                        break;
+                    }
                 }
             }
+
             if (!occupied) {
                 if (blockCount >= blockCapacity) {
                     blockCapacity *= 2;
                     blocks = (Block*)realloc(blocks, blockCapacity * sizeof(Block));
                 }
-                blocks[blockCount].position = cursorBlock;
+                blocks[blockCount].position = ghostBlockPos;
                 blocks[blockCount].active = true;
+                blocks[blockCount].type = selectedBlockType;
                 blockCount++;
             }
         }
 
         if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && hitBlockIndex != -1 && mouseCaptured) {
             Vector3 brokenBlockPos = blocks[hitBlockIndex].position;
+            BlockType brokenBlockType = blocks[hitBlockIndex].type;
             blocks[hitBlockIndex].active = false;
             _gc();
 
@@ -434,6 +518,9 @@ int main(void) {
                 if (debrisCount < debrisCapacity) {
                     debris[debrisCount].position = brokenBlockPos;
                     debris[debrisCount].active = true;
+                    debris[debrisCount].type = brokenBlockType;
+                    debris[debrisCount].rotationAngle = 0.0f;
+                    debris[debrisCount].rotationAxis = Vector3Normalize((Vector3){(float)GetRandomValue(-100, 100), (float)GetRandomValue(-100, 100), (float)GetRandomValue(-100, 100)});
 
                     debris[debrisCount].velocity.x = GetRandomValue(-100, 100) / 1000.0f;
                     debris[debrisCount].velocity.y = GetRandomValue(50, 200) / 1000.0f;
@@ -445,10 +532,13 @@ int main(void) {
             hitBlockIndex = -1;
         }
 
+        skip_mouse_input:
+
         for (int i = 0; i < debrisCount; i++) {
             if (debris[i].active) {
-                debris[i].velocity.y += GRAVITY;
-                debris[i].position = Vector3Add(debris[i].position, debris[i].velocity);
+                debris[i].velocity.y += GRAVITY * deltaTime;
+                debris[i].position = Vector3Add(debris[i].position, Vector3Scale(debris[i].velocity, deltaTime));
+                debris[i].rotationAngle += DEBRIS_ROTATION_SPEED * deltaTime;
 
                 if (debris[i].position.y < DEBRIS_FALL_THRESHOLD) {
                     debris[i].active = false;
@@ -462,42 +552,40 @@ int main(void) {
 
         BeginMode3D(camera);
 
-        for (int x = 0; x < BOARD_SIZE; x++) {
-            for (int z = 0; z < BOARD_SIZE; z++) {
-                Vector3 tilePos = { x * TILE_SIZE, 0.0f, z * TILE_SIZE };
-
-                DrawModel(groundModel, tilePos, 1.0f, WHITE);
-            }
-        }
+        rlDisableBackfaceCulling();
+        DrawModel(groundModel, (Vector3){(float)BOARD_SIZE/2.0f-0.5f, 0.0f, (float)BOARD_SIZE/2.0f-0.5f}, 1.0f, WHITE);
+        rlEnableBackfaceCulling();
 
         for (int i = 0; i < blockCount; i++) {
             if (blocks[i].active) {
                 Vector3 pos = blocks[i].position;
-
+                blockModel.materials[0] = *blockMaterials[blocks[i].type];
                 DrawModel(blockModel, pos, 1.0f, WHITE);
             }
         }
 
         for (int i = 0; i < debrisCount; i++) {
             if (debris[i].active) {
-
-                DrawModel(debrisModel, debris[i].position, 1.0f, WHITE);
+                debrisModel.materials[0] = *blockMaterials[debris[i].type];
+                DrawModelEx(debrisModel, debris[i].position, debris[i].rotationAxis, debris[i].rotationAngle, (Vector3){1.0f, 1.0f, 1.0f}, WHITE);
             }
         }
 
-        if (validHit && mouseCaptured) {
+        if (showGhostBlock && mouseCaptured) {
             float t = fmodf(GetTime() * GHOST_BLOCK_SPEED, 1.0f);
             float triangle = (t < 0.5f) ? (t * 2.0f) : (1.0f - (t - 0.5f) * 2.0f);
             float alpha = GHOST_BLOCK_MIN_ALPHA + (GHOST_BLOCK_MAX_ALPHA - GHOST_BLOCK_MIN_ALPHA) * triangle;
 
             Color ghostColor = (Color){ 255, 255, 255, (unsigned char)(alpha * 255) };
-
-            DrawModel(ghostBlockModel, cursorBlock, 1.0f, ghostColor);
+            ghostBlockModel.materials[0] = *blockMaterials[selectedBlockType];
+            DrawModel(ghostBlockModel, ghostBlockPos, 1.0f, ghostColor);
         }
 
         EndMode3D();
 
-        DrawText(TextFormat("FPS: %i", GetFPS()), 10, 10, FPS_TEXT_SIZE, WHITE);
+        DrawBlockPreview(blockTextures[selectedBlockType]);
+
+        DrawText(TextFormat("FPS: %i", displayedFPS), 10, 10, FPS_TEXT_SIZE, WHITE);
         DrawText(TextFormat("Blocks: %i", blockCount), 10, 10 + FPS_TEXT_SIZE, FPS_TEXT_SIZE, WHITE);
 
         if (mouseCaptured) {
@@ -508,15 +596,19 @@ int main(void) {
         EndDrawing();
     }
 
-    UnloadModel(groundModel);
     UnloadModel(blockModel);
     UnloadModel(debrisModel);
-    UnloadModel(ghostBlockModel); 
+    UnloadModel(ghostBlockModel);
+    UnloadModel(groundModel);
     UnloadTexture(grassTexture);
     UnloadTexture(stoneTexture);
-    UnloadMaterial(grassMaterial);
+    UnloadTexture(dirtTexture);
+    UnloadTexture(woodTexture);
     UnloadMaterial(stoneMaterial);
-    UnloadMaterial(ghostMaterial); 
+    UnloadMaterial(grassMaterial);
+    UnloadMaterial(dirtMaterial);
+    UnloadMaterial(woodMaterial);
+    UnloadMaterial(groundMaterial);
 
     free(blocks);
     free(debris);
