@@ -28,3 +28,4 @@ Run `box`:
 - Right click = Remove block
 - Backspace = Uncapture/capture mouse
 - Escape = Exit
+- 1 to 4 = Change blocks
